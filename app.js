@@ -1,39 +1,96 @@
 import express from 'express';
-import { createServer } from 'node:http';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { createServer } from 'http';
 import { Server } from 'socket.io';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
 const app = express();
 const server = createServer(app);
-const io = new Server(server, {
-  connectionStateRecovery: {}
-});
+const io = new Server(server);
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
+// Calcula el directorio actual basándote en el módulo actual
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 app.get('/', (req, res) => {
-  res.sendFile(join(__dirname, 'index.html'));
+  res.sendFile(path.join(__dirname, 'index.html'));
 });
 
-io.on('connection', (socket) => {
-  console.log('a user connected');
-});
+// Objeto para almacenar usuarios conectados y sus salas
+const connectedUsers = {};
 
 io.on('connection', (socket) => {
-  console.log('a user connected');
+  console.log('Nuevo cliente conectado');
+
+  socket.on('chat message', (data) => {
+    console.log(data);
+    io.to(data.room).emit('chat message', {
+      username: data.username,
+      message: data.message
+    });
+  });
+
   socket.on('disconnect', () => {
-    console.log('user disconnected');
+    console.log('Usuario desconectado');
+    for (const room in connectedUsers) {
+      const userIndex = connectedUsers[room].findIndex((user) => user.id === socket.id);
+      if (userIndex !== -1) {
+        const username = connectedUsers[room][userIndex].username;
+        connectedUsers[room].splice(userIndex, 1);
+        updateConnectedUsers(room);
+        console.log(`Usuario ${username} abandonó la sala: ${room}`);
+        io.to(room).emit('user left', { username, room });
+      }
+    }
   });
-});
 
-io.on('connection', (socket) => {
-  socket.on('chat message', (msg) => {
-    io.emit('chat message', msg);
+  socket.on('join room', (data) => {
+    const { room, username } = data;
+    socket.join(room);
+    console.log(`Usuario ${username} se unió a la sala: ${room}`);
+
+    if (!connectedUsers[room]) {
+      connectedUsers[room] = [];
+    }
+
+    connectedUsers[room].push({ id: socket.id, username });
+    updateConnectedUsers(room);
+    io.to(room).emit('user joined', { username, room });
   });
-});
+
+  socket.on('leave room', (data) => {
+    const { room } = data;
+    socket.leave(room);
+    console.log(`Usuario con ID ${socket.id} abandonó la sala: ${room}`);
+  });
 
 
-server.listen(3000, () => {
-  console.log('server running at http://localhost:3000');
+  socket.on('private message', (data) => {
+    const { recipient, message } = data;
+    const recipientUser = connectedUsers[data.room] && connectedUsers[data.room].find(user => user.username === recipient);
+
+    if (recipientUser && message) {
+      io.to(recipientUser.id).emit('private message', {
+        username: data.username,
+        message: data.message,
+        recipient: data.recipient,
+      });
+
+      socket.emit('private message', {
+        username: data.username,
+        message: data.message,
+        recipient: data.recipient,
+      });
+    }
+  });
+
 });
+
+function updateConnectedUsers(room) {
+  if (connectedUsers[room]) {
+    const uniqueUsernames = [...new Set(connectedUsers[room].map(user => user.username))];
+    io.in(room).emit('connected users', uniqueUsernames); // Cambiado a io.in(room).emit
+  }
+}
+
+const PORT = 3005;
+server.listen(PORT, () => console.log(`Servidor escuchando en el puerto ${PORT}`));
